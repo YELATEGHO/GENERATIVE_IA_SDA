@@ -2,3 +2,4 @@
 .env
 # Dossier de l'environnement virtuel
 venv/
+chroma_db/
