@@ -15,7 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
 # Agents et Outils
-from langchain import hub
+from langchain_hub import pull  # <-- CORRECT
 from langchain.agents import create_react_agent, AgentExecutor, Tool
 from langchain.chains import LLMMathChain
 from langchain_community.tools import DuckDuckGoSearchRun, WikipediaQueryRun
@@ -24,6 +24,7 @@ from langchain_community.utilities import WikipediaAPIWrapper
 # Mémoire
 from langchain.memory import ConversationBufferMemory
 from langchain_core.prompts import MessagesPlaceholder
+
 
 # --- FONCTIONS PRINCIPALES ---
 
@@ -52,7 +53,7 @@ def ingest_documents():
         db = Chroma.from_documents(texts, embeddings, persist_directory=DB_PATH)
         time.sleep(1)
 
-        status.update(label="Outil RAG prêt à l'emploi !", state="complete", expanded=False)
+        status.update(label="Outil RAG prêt à l'emploi ✅", state="complete", expanded=False)
     return True
 
 
@@ -64,18 +65,18 @@ st.caption("Je peux répondre à des questions sur vos documents, chercher sur l
 if "rag_initialized" not in st.session_state:
     st.session_state.rag_initialized = ingest_documents()
 
+
 # --- CONFIGURATION DES OUTILS ET DE L'AGENT ---
 
 llm = ChatOpenAI(model_name="gpt-4o", temperature=0, openai_api_key=st.secrets["OPENAI_API_KEY"])
 
 def get_current_datetime(user_input: str = "") -> str:
-    """Renvoie la date et l'heure actuelles dans un format lisible."""
     now = datetime.datetime.now()
     return f"La date et l'heure actuelles sont : {now.strftime('%A %d %B %Y, %H:%M:%S')}."
 
 
-# **** Utilisation de LCEL pour le RAG Tool ****
 def setup_rag_tool():
+    """Outil RAG basé sur LCEL (LangChain Expression Language)."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=st.secrets["OPENAI_API_KEY"])
     db = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
     retriever = db.as_retriever()
@@ -132,15 +133,16 @@ tools.extend([
         name="Horloge",
         func=get_current_datetime,
         description="Utile pour obtenir la date et l'heure actuelles."
-    )
+    ),
 ])
 
+
 # --- CONFIGURATION DE L'AGENT AVEC MÉMOIRE ---
-prompt = hub.pull("hwchase17/react-chat")
-prompt.messages.insert(1, MessagesPlaceholder(variable_name="chat_history"))
+prompt = pull("hwchase17/react-chat")  # <-- Correct
 memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 agent = create_react_agent(llm, tools, prompt)
 agent_executor = AgentExecutor(agent=agent, tools=tools, memory=memory, verbose=True, handle_parsing_errors=True)
+
 
 # --- INTERFACE STREAMLIT ---
 if "messages" not in st.session_state:
