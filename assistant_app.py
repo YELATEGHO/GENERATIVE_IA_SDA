@@ -4,14 +4,15 @@ import os
 import time
 
 # --- Imports Logiques ---
-from dotenv import load_dotenv
-
-# RAG
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
-from langchain.chains import RetrievalQA
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Nouveaux imports pour LCEL
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
 
 # Agents et Outils
 from langchain import hub
@@ -47,10 +48,7 @@ def ingest_documents():
         time.sleep(1)
 
         st.write("Vectorisation et stockage dans ChromaDB...")
-        embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-small",
-            openai_api_key=st.secrets["OPENAI_API_KEY"]
-        )
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=st.secrets["OPENAI_API_KEY"])
         db = Chroma.from_documents(texts, embeddings, persist_directory=DB_PATH)
         time.sleep(1)
 
@@ -63,7 +61,6 @@ st.set_page_config(page_title="Assistant Intelligent Multi-Compétences", page_i
 st.title("🤖 Assistant Intelligent Multi-Compétences")
 st.caption("Je peux répondre à des questions sur vos documents, chercher sur le web, calculer, et plus encore.")
 
-# Vérification et ingestion des documents au démarrage de l'application
 if "rag_initialized" not in st.session_state:
     st.session_state.rag_initialized = ingest_documents()
 
@@ -71,19 +68,35 @@ if "rag_initialized" not in st.session_state:
 
 llm = ChatOpenAI(model_name="gpt-4o", temperature=0, openai_api_key=st.secrets["OPENAI_API_KEY"])
 
-
 def get_current_datetime(user_input: str = "") -> str:
     """Renvoie la date et l'heure actuelles dans un format lisible."""
     now = datetime.datetime.now()
     return f"La date et l'heure actuelles sont : {now.strftime('%A %d %B %Y, %H:%M:%S')}."
 
 
+# **** Utilisation de LCEL pour le RAG Tool ****
 def setup_rag_tool():
-    """Crée l’outil RAG connecté à la base Chroma persistée."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=st.secrets["OPENAI_API_KEY"])
     db = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
     retriever = db.as_retriever()
-    rag_chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever)
+
+    template = """Répondez à la question en vous basant uniquement sur le contexte suivant :
+    {context}
+
+    Question : {question}
+    """
+    prompt = ChatPromptTemplate.from_template(template)
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    rag_chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
     return Tool(
         name="Recherche Documents Internes",
         func=rag_chain.invoke,
@@ -99,7 +112,6 @@ tools = []
 if st.session_state.rag_initialized:
     tools.append(setup_rag_tool())
 
-# Ajout des autres outils
 tools.extend([
     Tool(
         name="Recherche Web",
