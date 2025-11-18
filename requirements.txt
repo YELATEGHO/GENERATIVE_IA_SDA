@@ -1,12 +1,36 @@
-streamlit
-python-dotenv
-langchain
-langchain-core
-langchain-openai
-langchain-chroma
-langchain-community
-langchain-text-splitters
-langchainhub
-pypdf
-duckduckgo-search
-wikipedia
+streamlit==1.51.0
+
+# LangChain ecosystem (stable)
+langchain==0.3.10
+langchain-core==0.3.63
+langchain-community==0.3.10
+langchain-openai==0.2.10
+langchain-text-splitters==0.3.2
+
+# Vector Store
+langchain-chroma==0.2.2
+chromadb==0.4.24
+chroma-hnswlib==0.7.3
+
+# Embeddings & tokenizer
+tiktoken==0.12.0
+
+# Utilities
+python-dotenv==1.2.1
+pydantic==2.12.4
+pydantic-settings==2.12.0
+
+# Data / PDF
+pypdf==6.2.0
+pandas==2.3.3
+
+# HTTP
+requests==2.32.5
+
+# Async
+aiohttp==3.13.2
+
+# Needed by Streamlit / LangChain
+numpy==1.26.4
+protobuf==6.33.0
+typing_extensions==4.15.0

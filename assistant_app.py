@@ -1,150 +1,187 @@
+# --- Imports généraux ---
 import streamlit as st
-import datetime
-import os
-import time
 from dotenv import load_dotenv
+import re
+from datetime import datetime   # <-- AJOUT ICI
 
-# --- Imports Logiques ---
+# --- Imports LangChain ---
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
-from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
-from langchain import hub  # ✅ bon import
-from langchain.agents import create_react_agent, AgentExecutor, Tool
-from langchain.chains import LLMMathChain
-from langchain_community.tools import DuckDuckGoSearchRun, WikipediaQueryRun
-from langchain_community.utilities import WikipediaAPIWrapper
-from langchain.memory import ConversationBufferMemory
-from langchain_core.prompts import MessagesPlaceholder
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_community.tools import DuckDuckGoSearchRun
+import wikipedia
 
-# --- GESTION DE LA CLÉ API (Local vs. Déploiement) ---
-try:
-    # Essayer de lire les secrets de Streamlit (pour le déploiement)
-    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-except Exception:
-    # Si ça échoue, on est en local, donc on charge le .env
-    load_dotenv()
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# --- Charger les variables d'environnement ---
+load_dotenv()
 
-# --- FONCTION PRINCIPALE D’INGESTION ---
-def ingest_documents():
-    DOCUMENTS_PATH = "documents"
-    DB_PATH = "chroma_db"
+# --- CONFIGURATION ---
+DB_PATH = "chroma_db"
 
-    if not os.path.exists(DOCUMENTS_PATH) or not os.listdir(DOCUMENTS_PATH):
-        st.warning("⚠️ Le dossier 'documents' est vide. L'outil de recherche interne ne sera pas disponible.")
-        return False
+# --- Initialisation du modèle principal ---
+llm = ChatOpenAI(model_name="gpt-4o", temperature=0)
 
-    with st.status("📚 Ingestion des documents en cours...", expanded=True) as status:
-        st.write("📥 Chargement des documents PDF...")
-        loader = DirectoryLoader(DOCUMENTS_PATH, glob="*.pdf", loader_cls=PyPDFLoader)
-        documents = loader.load()
-        time.sleep(1)
+# --- Outil RAG : recherche dans la base Chroma ---
+def search_documents(query: str) -> str:
+    try:
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        db = Chroma(persist_directory=DB_PATH, embedding_function=embeddings)
 
-        st.write("✂️ Découpage des textes...")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        texts = text_splitter.split_documents(documents)
-        time.sleep(1)
+        collection = db.get()
+        if not collection['ids']:
+            return "⚠️ La base de données est vide. Veuillez d'abord indexer des documents."
 
-        st.write("🧠 Vectorisation et stockage dans ChromaDB...")
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=OPENAI_API_KEY)
-        Chroma.from_documents(texts, embeddings, persist_directory=DB_PATH)
-        time.sleep(1)
+        docs = db.similarity_search(query, k=3)
+        if not docs:
+            return "⚠️ Aucun document pertinent trouvé dans la base."
 
-        status.update(label="✅ Outil RAG prêt à l'emploi !", state="complete", expanded=False)
-    return True
+        context = "\n\n---\n\n".join([f"Document {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
 
-# --- CONFIGURATION DE L'APPLICATION ---
+        prompt = ChatPromptTemplate.from_template("""Réponds à la question suivante en te basant UNIQUEMENT sur le contexte fourni.
+Si le contexte ne contient pas l'information, dis-le clairement.
+
+Contexte : {context}
+
+Question : {question}
+
+Réponse :""")
+
+        chain = prompt | llm | StrOutputParser()
+        result = chain.invoke({"context": context, "question": query})
+        return result
+
+    except Exception as e:
+        import traceback
+        return f"Erreur lors de la recherche dans les documents : {str(e)}"
+
+
+# --- Autres outils ---
+def search_web(query: str) -> str:
+    try:
+        search = DuckDuckGoSearchRun()
+        return search.run(query)
+    except Exception as e:
+        return f"Erreur lors de la recherche web : {str(e)}"
+
+
+def search_wikipedia(query: str) -> str:
+    try:
+        wikipedia.set_lang("fr")
+
+        try:
+            page = wikipedia.page(query, auto_suggest=True)
+        except wikipedia.exceptions.DisambiguationError as e:
+            page = wikipedia.page(e.options[0])
+        except wikipedia.exceptions.PageError:
+            search_results = wikipedia.search(query, results=3)
+            if not search_results:
+                return f"Aucun résultat trouvé sur Wikipedia pour : {query}"
+            page = wikipedia.page(search_results[0])
+
+        summary = page.summary[:2000]
+        if len(page.summary) > 2000:
+            summary += "..."
+
+        return f"**{page.title}**\n\n{summary}\n\n🔗 URL : {page.url}"
+
+    except Exception as e:
+        return f"Erreur lors de la recherche Wikipedia : {str(e)}"
+
+
+def calculate_math(query: str) -> str:
+    try:
+        prompt = f"Résous ce problème mathématique et donne uniquement le résultat numérique : {query}"
+        result = llm.invoke(prompt)
+        return result.content
+    except Exception as e:
+        return f"Erreur de calcul : {str(e)}"
+
+
+# --- 🔥 NOUVEL OUTIL : DATE & HEURE ---
+def get_datetime(_: str = "") -> str:
+    now = datetime.now()
+    return now.strftime("📅 Date : %d/%m/%Y\n⏰ Heure : %H:%M:%S")
+
+
+# --- Agent intelligent ---
+def agent_query(user_input: str) -> str:
+
+    system_prompt = """Tu es un assistant intelligent avec accès à plusieurs outils :
+
+1. search_documents : Pour rechercher dans les documents PDF internes
+2. search_web : Pour rechercher des informations récentes sur Internet
+3. search_wikipedia : Pour des informations encyclopédiques
+4. calculate_math : Pour effectuer des calculs mathématiques
+5. get_datetime : Pour obtenir la date et l'heure actuelles
+
+Pour chaque question :
+- Analyse la question
+- Décide quel outil utiliser (ou si tu peux répondre directement)
+- Utilise TOUJOURS search_documents en priorité si la question concerne des informations internes
+
+IMPORTANT : Pour utiliser un outil, tu DOIS répondre EXACTEMENT dans ce format :
+TOOL: nom_outil
+QUERY: ta requête ici
+"""
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_input)
+    ]
+
+    response = llm.invoke(messages)
+    response_text = response.content
+
+    tool_pattern = r'TOOL:\s*(\w+)\s*\nQUERY:\s*(.+?)(?:\n|$)'
+    match = re.search(tool_pattern, response_text, re.DOTALL)
+
+    if match:
+        tool_name = match.group(1).strip()
+        tool_query = match.group(2).strip()
+
+        st.info(f"🔧 Utilisation de l'outil : **{tool_name}**\n\nRequête : *{tool_query}*")
+
+        if tool_name == "search_documents":
+            tool_result = search_documents(tool_query)
+        elif tool_name == "search_web":
+            tool_result = search_web(tool_query)
+        elif tool_name == "search_wikipedia":
+            tool_result = search_wikipedia(tool_query)
+        elif tool_name == "calculate_math":
+            tool_result = calculate_math(tool_query)
+        elif tool_name == "get_datetime":   # <-- AJOUT IMPORTANT
+            tool_result = get_datetime(tool_query)
+        else:
+            tool_result = f"⚠️ Outil '{tool_name}' non reconnu"
+
+        final_messages = [
+            SystemMessage(content="Tu es un assistant qui formule des réponses claires basées sur les résultats des outils. Réponds en français."),
+            HumanMessage(content=f"Question originale : {user_input}\n\nRésultat de l'outil : {tool_result}\n\nFormule une réponse claire et complète en français.")
+        ]
+        final_response = llm.invoke(final_messages)
+        return final_response.content
+
+    return response_text
+
+
+# --- Interface Streamlit ---
 st.set_page_config(page_title="Assistant Intelligent Multi-Compétences", page_icon="🤖")
 st.title("🤖 Assistant Intelligent Multi-Compétences")
-st.caption("Je peux répondre à des questions sur vos documents, chercher sur le web, calculer, et plus encore.")
+st.caption("Posez-moi des questions sur vos documents, le web, ou effectuez des calculs.")
 
-if "rag_initialized" not in st.session_state:
-    st.session_state.rag_initialized = ingest_documents()
+with st.sidebar:
+    st.header("🔍 Informations de Debug")
+    if st.button("Vérifier la base RAG"):
+        try:
+            embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+            db = Chroma(persist_directory=DB_PATH, embedding_function=embeddings)
+            collection = db.get()
+            st.success(f"✅ Base RAG chargée : {len(collection['ids'])} documents")
+        except Exception as e:
+            st.error(f"❌ Erreur : {e}")
 
-# --- CONFIGURATION DES OUTILS ---
-llm = ChatOpenAI(model_name="gpt-4o", temperature=0, openai_api_key=OPENAI_API_KEY)
-
-def get_current_datetime(_: str = "") -> str:
-    now = datetime.datetime.now()
-    return f"🕒 Nous sommes le {now.strftime('%A %d %B %Y, %H:%M:%S')}."
-
-def setup_rag_tool():
-    """Outil RAG basé sur les documents locaux."""
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=OPENAI_API_KEY)
-    db = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
-    retriever = db.as_retriever()
-
-    template = """Répondez à la question en vous basant uniquement sur le contexte suivant :
-    {context}
-
-    Question : {question}
-    """
-    prompt = ChatPromptTemplate.from_template(template)
-
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
-    rag_chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    return Tool(
-        name="Recherche Documents Internes",
-        func=rag_chain.invoke,
-        description=(
-            "Indispensable pour répondre aux questions sur les documents internes, "
-            "les politiques de l'entreprise, les manuels et les rapports PDF."
-        )
-    )
-
-tools = []
-if st.session_state.get("rag_initialized", False):
-    tools.append(setup_rag_tool())
-
-tools.extend([
-    Tool(
-        name="Recherche Web",
-        func=DuckDuckGoSearchRun().run,
-        description="Utile pour rechercher sur internet des informations récentes ou générales."
-    ),
-    Tool(
-        name="Wikipedia",
-        func=WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper()).run,
-        description="Utile pour rechercher des informations factuelles sur des sujets encyclopédiques."
-    ),
-    Tool(
-        name="Calculatrice",
-        func=LLMMathChain.from_llm(llm=llm).run,
-        description="Utile pour effectuer des calculs mathématiques."
-    ),
-    Tool(
-        name="Horloge",
-        func=get_current_datetime,
-        description="Utile pour obtenir la date et l'heure actuelles."
-    ),
-])
-
-# --- CONFIGURATION DE L'AGENT AVEC MÉMOIRE ---
-prompt = hub.pull("hwchase17/react-chat")  # ✅ modèle correct disponible sur LangChain Hub
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-agent = create_react_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    memory=memory,
-    verbose=True,
-    handle_parsing_errors=True
-)
-
-# --- INTERFACE STREAMLIT ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -154,13 +191,15 @@ for message in st.session_state.messages:
 
 if user_query := st.chat_input("Posez votre question ici..."):
     st.session_state.messages.append({"role": "user", "content": user_query})
-
     with st.chat_message("user"):
         st.markdown(user_query)
 
     with st.chat_message("assistant"):
-        with st.spinner("🤔 Réflexion..."):
-            response = agent_executor.invoke({"input": user_query})
-            st.markdown(response["output"])
+        with st.spinner("Réflexion..."):
+            try:
+                answer = agent_query(user_query)
+            except Exception as e:
+                answer = f"⚠️ Une erreur est survenue : {e}"
+            st.markdown(answer)
 
-    st.session_state.messages.append({"role": "assistant", "content": response["output"]})
+    st.session_state.messages.append({"role": "assistant", "content": answer})

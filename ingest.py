@@ -1,54 +1,55 @@
 import os
+import shutil
 from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 
-# Charger les variables d'environnement du fichier .env
+# Charger les variables d'environnement du fichier .env local
 load_dotenv()
 
-# Définir les chemins
 DOCUMENTS_PATH = "documents"
 DB_PATH = "chroma_db"
 
-
-def create_vector_db():
+def main():
     """
-    Cette fonction crée une base de données vectorielle à partir des documents PDF.
+    Fonction principale pour créer la base de données vectorielle en local.
     """
-    print("Début de la création de la base de données vectorielle...")
+    print("Début de l'ingestion des documents locaux...")
 
-    # 1. Charger les documents PDF du dossier spécifié
-    loader = DirectoryLoader(DOCUMENTS_PATH, glob="*.pdf", loader_cls=PyPDFLoader)
-    documents = loader.load()
+    # Recommandé : supprimer l'ancienne base pour éviter les conflits
+    if os.path.exists(DB_PATH):
+        print(f"Suppression de l'ancienne base '{DB_PATH}'...")
+        shutil.rmtree(DB_PATH)
 
-    if not documents:
-        print("Aucun document PDF trouvé. Veuillez ajouter des fichiers PDF dans le dossier 'documents'.")
+    if not os.path.exists(DOCUMENTS_PATH) or not os.listdir(DOCUMENTS_PATH):
+        print(f"Erreur : Le dossier '{DOCUMENTS_PATH}' est vide ou n'existe pas.")
         return
 
+    # 1. Charger les documents
+    loader = DirectoryLoader(DOCUMENTS_PATH, glob="*.pdf", loader_cls=PyPDFLoader, show_progress=True)
+    documents = loader.load()
     print(f"{len(documents)} document(s) chargé(s).")
 
-    # 2. Découper les documents en morceaux (chunks)
-    # On découpe les textes pour qu'ils ne soient pas trop longs pour le modèle.
+    # 2. Découper les documents
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     texts = text_splitter.split_documents(documents)
-    print(f"{len(texts)} morceaux de texte créés.")
+    print(f"✂️  Les documents ont été découpés en {len(texts)} morceaux (chunks).")
 
-    # 3. Créer les embeddings (vecteurs numériques)
-    # On utilise le modèle d'embedding d'OpenAI.
+    # 3. Créer les embeddings et stocker dans ChromaDB
+    print("Création des embeddings et stockage dans ChromaDB... (cela peut prendre un moment)")
+
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-    # 4. Créer et persister la base de données vectorielle ChromaDB
-    # Les textes et leurs embeddings sont stockés dans le dossier spécifié (DB_PATH).
-    print("Création et stockage des embeddings dans ChromaDB...")
+    # La création et la persistance se font en une seule étape
     db = Chroma.from_documents(texts, embeddings, persist_directory=DB_PATH)
 
     print("-" * 50)
-    print(f"Base de données vectorielle créée avec succès dans le dossier '{DB_PATH}' !")
-    print(f"Nombre de chunks vectorisés et stockés : {db._collection.count()}")
+    print(f"✅ L'ingestion est terminée.")
+    print(f"La base de données vectorielle a été créée dans le dossier '{DB_PATH}'.")
     print("-" * 50)
 
 
 if __name__ == "__main__":
-    create_vector_db()
+    main()
